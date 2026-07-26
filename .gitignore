@@ -1,1 +1,24 @@
+# editors
 .vscode/
+
+# colcon build artifacts (when this repo sits at a workspace root)
+build/
+install/
+log/
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# uv / virtualenv -- the BA venv is ~7 GB (torch + compiled bae) and is
+# recreated with `uv sync`, so it stays out of git
+.venv/
+venv/
+
+# downloaded installers
+*.deb
+
+# the venv symlink points outside the repo; recreate locally
+ba/.venv
