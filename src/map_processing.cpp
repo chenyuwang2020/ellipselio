@@ -500,6 +500,156 @@ void MappingNode::PublishScan() {
   pub_scan_->publish(scan_msg);
 }
 
+void MappingNode::InitResultSaving() {
+  if (save_path_.empty()) return;
+
+  std::error_code ec;
+  const std::filesystem::path root(save_path_);
+  std::filesystem::create_directories(root, ec);
+  if (ec) {
+    RCLCPP_ERROR_STREAM(this->get_logger(), "save: cannot create "
+                                               << root.string() << ": "
+                                               << ec.message()
+                                               << " - saving disabled");
+    save_path_.clear();
+    return;
+  }
+
+  if (save_scans_) {
+    const std::filesystem::path scans = root / "scans";
+    std::filesystem::create_directories(scans, ec);
+    if (ec) {
+      RCLCPP_ERROR_STREAM(this->get_logger(),
+                          "save: cannot create " << scans.string() << ": "
+                                                 << ec.message()
+                                                 << " - per-scan dump off");
+      save_scans_ = false;
+    } else {
+      scans_dir_ = scans.string();
+    }
+  }
+
+  lidar_pose_file_.open(root / "lidar_pose_tum.txt");
+  imu_pose_file_.open(root / "imu_pose_tum.txt");
+  if (!lidar_pose_file_.is_open() || !imu_pose_file_.is_open()) {
+    RCLCPP_ERROR_STREAM(this->get_logger(),
+                        "save: cannot open trajectory files in "
+                            << root.string() << " - saving disabled");
+    save_path_.clear();
+    return;
+  }
+
+  // TUM format: timestamp tx ty tz qx qy qz qw
+  for (auto* f : {&lidar_pose_file_, &imu_pose_file_}) {
+    *f << "# timestamp tx ty tz qx qy qz qw\n";
+    f->precision(9);
+    *f << std::fixed;
+  }
+
+  RCLCPP_INFO_STREAM(this->get_logger(),
+                     "save: writing results to " << root.string()
+                                                 << (save_scans_
+                                                         ? (save_scans_local_
+                                                                ? " (scans: "
+                                                                  "lidar frame)"
+                                                                : " (scans: "
+                                                                  "world frame)")
+                                                         : " (no per-scan dump)"));
+}
+
+void MappingNode::SaveFramePoses() {
+  if (save_path_.empty() || !lidar_pose_file_.is_open()) return;
+
+  // scan_end_time_ is the deskew reference instant, so poses and per-scan
+  // clouds share one timestamp.
+  const double stamp = rclcpp::Time(scan_end_time_).seconds();
+
+  const V3D& t_wi = kf_state_.state.pos;
+  const Eigen::Quaterniond q_wi = kf_state_.state.rot;
+
+  imu_pose_file_ << stamp << ' ' << t_wi(0) << ' ' << t_wi(1) << ' ' << t_wi(2)
+                 << ' ' << q_wi.x() << ' ' << q_wi.y() << ' ' << q_wi.z() << ' '
+                 << q_wi.w() << '\n';
+
+  // T_world_lidar = T_world_imu * T_imu_lidar, using the filter's online
+  // extrinsic estimate rather than the static config values.
+  const Eigen::Quaterniond q_il(kf_state_.state.offset_R_L_I);
+  const V3D t_wl = kf_state_.state.rot * kf_state_.state.offset_T_L_I + t_wi;
+  const Eigen::Quaterniond q_wl = (q_wi * q_il).normalized();
+
+  lidar_pose_file_ << stamp << ' ' << t_wl(0) << ' ' << t_wl(1) << ' '
+                   << t_wl(2) << ' ' << q_wl.x() << ' ' << q_wl.y() << ' '
+                   << q_wl.z() << ' ' << q_wl.w() << '\n';
+}
+
+void MappingNode::SaveFrameCloud() {
+  if (save_path_.empty() || !save_scans_ || scan_cloud_->empty()) return;
+
+  char name[32];
+  std::snprintf(name, sizeof(name), "%06d.pcd", map_counter_);
+  const std::string path = (std::filesystem::path(scans_dir_) / name).string();
+
+  int ret;
+  if (save_scans_local_) {
+    ret = pcl::io::savePCDFileBinary(path, *scan_cloud_);
+  } else {
+    // Apply the same LiDAR->world transform MapIncremental() uses, on a copy so
+    // the pipeline's own in-place transform is unaffected.
+    EllipseLioPointCloud world_pc(*scan_cloud_);
+    const Eigen::Isometry3d T_wi =
+        Eigen::Translation3d(kf_state_.state.pos) * kf_state_.state.rot;
+    const Eigen::Isometry3d T_il =
+        Eigen::Translation3d(kf_state_.state.offset_T_L_I) *
+        Eigen::Quaterniond(kf_state_.state.offset_R_L_I);
+    const Eigen::Isometry3d T_wl = T_wi * T_il;
+#pragma omp parallel for
+    for (int i = 0; i < static_cast<int>(world_pc.size()); i++) {
+      world_pc.points[i].getVector3fMap() =
+          (T_wl * world_pc.points[i].getVector3fMap().cast<double>())
+              .cast<float>();
+    }
+    ret = pcl::io::savePCDFileBinary(path, world_pc);
+  }
+
+  if (ret != 0) {
+    RCLCPP_WARN_STREAM_ONCE(this->get_logger(),
+                            "save: failed writing scan " << path);
+  }
+}
+
+void MappingNode::SaveMap() {
+  std::lock_guard<std::mutex> lock(save_mutex_);
+  if (save_path_.empty() || results_saved_) return;
+
+  lidar_pose_file_.flush();
+  imu_pose_file_.flush();
+
+  map_mutex_.lock();
+  const size_t map_size = map_cloud_->size();
+  bool ok = false;
+  if (map_size) {
+    const std::string path =
+        (std::filesystem::path(save_path_) / "map.pcd").string();
+    ok = pcl::io::savePCDFileBinary(path, *map_cloud_) == 0;
+  }
+  map_mutex_.unlock();
+
+  if (!map_size) {
+    RCLCPP_WARN(this->get_logger(), "save: map is empty, nothing written");
+    return;
+  }
+  if (!ok) {
+    RCLCPP_ERROR(this->get_logger(), "save: failed writing map.pcd");
+    return;
+  }
+
+  results_saved_ = true;
+  RCLCPP_INFO_STREAM(this->get_logger(),
+                     "save: map.pcd (" << map_size << " points), "
+                                       << map_counter_ << " frames -> "
+                                       << save_path_);
+}
+
 void MappingNode::PublishMarkers() {
   if (!map_counter_) return;
 
@@ -943,6 +1093,9 @@ MappingNode::MappingNode(
   this->declare_parameter<std::string>("mapping.namespace", "");
   this->declare_parameter<int>("mapping.pub_map_n_secs", 10);
   this->declare_parameter<double>("mapping.map_resolution", 0.1);
+  this->declare_parameter<std::string>("mapping.save_path", "");
+  this->declare_parameter<bool>("mapping.save_scans", true);
+  this->declare_parameter<bool>("mapping.save_scans_local", true);
 
   this->declare_parameter<int>("imu.rate", 100);
   this->declare_parameter<double>("imu.gyr_noise", 0.1);
@@ -981,6 +1134,10 @@ MappingNode::MappingNode(
   this->get_parameter_or<int>("mapping.pub_map_n_secs", pub_map_n_secs_, 10);
   this->get_parameter_or<double>("mapping.map_resolution", map_resolution_,
                                  0.1);
+  this->get_parameter_or<std::string>("mapping.save_path", save_path_, "");
+  this->get_parameter_or<bool>("mapping.save_scans", save_scans_, true);
+  this->get_parameter_or<bool>("mapping.save_scans_local", save_scans_local_,
+                               true);
 
   this->get_parameter_or<int>("imu.rate", imu_params_.rate, 100);
   this->get_parameter_or<double>("imu.gyr_noise", imu_params_.gyr_noise, 0.1);
@@ -1119,6 +1276,23 @@ MappingNode::MappingNode(
   pub_mark_ = this->create_publisher<visualization_msgs::msg::MarkerArray>(
       node_namespace_ + "/visualization_marker", rclcpp::SensorDataQoS());
 
+  InitResultSaving();
+
+  save_srv_ = this->create_service<std_srvs::srv::Trigger>(
+      node_namespace_ + "/save_results",
+      [this](const std_srvs::srv::Trigger::Request::SharedPtr,
+             std_srvs::srv::Trigger::Response::SharedPtr res) {
+        if (save_path_.empty()) {
+          res->success = false;
+          res->message = "mapping.save_path is not set";
+          return;
+        }
+        SaveMap();
+        res->success = results_saved_;
+        res->message = results_saved_ ? ("results written to " + save_path_)
+                                      : "failed to write map, see node log";
+      });
+
   loop_timer_ = rclcpp::create_timer(
       this, this->get_clock(),
       std::chrono::milliseconds(std::max(1000 / imu_params_.rate, 10)),
@@ -1156,7 +1330,14 @@ MappingNode::MappingNode(
   RCLCPP_INFO(this->get_logger(), "Node init finished.");
 }
 
-MappingNode::~MappingNode() {}
+MappingNode::~MappingNode() {
+  // Best-effort fallback: on a clean shutdown this saves the run even if the
+  // /save_results service was never called. Component containers do not
+  // guarantee the destructor runs on SIGINT, so prefer calling the service.
+  SaveMap();
+  if (lidar_pose_file_.is_open()) lidar_pose_file_.close();
+  if (imu_pose_file_.is_open()) imu_pose_file_.close();
+}
 
 void MappingNode::InitCamProcess() {
   if (num_cams_ == 0) return;
@@ -1383,6 +1564,12 @@ void MappingNode::TimerCallback() {
     }
 
     t3 = omp_get_wtime();
+
+    // scan_cloud_ is still in the LiDAR frame here; MapIncremental() below
+    // transforms it to world coordinates in place, so the per-scan dump and
+    // the pose must both be taken at this point.
+    SaveFramePoses();
+    SaveFrameCloud();
 
     map_mutex_.lock();
     MapIncremental();

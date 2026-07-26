@@ -48,6 +48,23 @@ def generate_launch_description():
         default_value='ellipselio_container',
         description='container name')
 
+    declare_bag_path_cmd = DeclareLaunchArgument(
+        'bag_path', default_value='',
+        description='Bag being played; results go to <bag parent>/lio_res/ellipselio'
+    )
+    declare_save_path_cmd = DeclareLaunchArgument(
+        'save_path', default_value='',
+        description='Explicit output directory; overrides bag_path. Empty disables saving'
+    )
+    declare_save_scans_cmd = DeclareLaunchArgument(
+        'save_scans', default_value='true',
+        description='Dump each frame to save_path/scans/NNNNNN.pcd'
+    )
+    declare_save_scans_local_cmd = DeclareLaunchArgument(
+        'save_scans_local', default_value='true',
+        description='Per-scan clouds in the LiDAR frame (true, for BA) or world frame'
+    )
+
     container = Node(
         package='rclcpp_components',
         executable='component_container_mt',
@@ -67,6 +84,10 @@ def generate_launch_description():
             'rviz': rviz_use,
             'rviz_cfg': rviz_cfg,
             'container_name': container_name,
+            'bag_path': LaunchConfiguration('bag_path'),
+            'save_path': LaunchConfiguration('save_path'),
+            'save_scans': LaunchConfiguration('save_scans'),
+            'save_scans_local': LaunchConfiguration('save_scans_local'),
         }.items(),
     )
 
@@ -77,6 +98,10 @@ def generate_launch_description():
     ld.add_action(declare_rviz_cmd)
     ld.add_action(declare_rviz_config_path_cmd)
     ld.add_action(container_name_arg)
+    ld.add_action(declare_bag_path_cmd)
+    ld.add_action(declare_save_path_cmd)
+    ld.add_action(declare_save_scans_cmd)
+    ld.add_action(declare_save_scans_local_cmd)
     ld.add_action(container)
     ld.add_action(base_launch)
 

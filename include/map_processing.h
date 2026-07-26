@@ -12,6 +12,7 @@
 #include <math.h>
 #include <omp.h>
 #include <pcl_conversions/pcl_conversions.h>
+#include <pcl/io/pcd_io.h>
 #include <sys/times.h>
 #include <tf2_ros/transform_broadcaster.h>
 
@@ -20,6 +21,8 @@
 #include <chrono>
 #include <cmath>
 #include <ellipselio/msg/ellipse_lio_analytics.hpp>
+#include <filesystem>
+#include <fstream>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <geometry_msgs/msg/vector3.hpp>
 #include <limits>
@@ -117,6 +120,35 @@ class MappingNode : public rclcpp::Node {
   void PublishMap();
   /// @brief Publish latest LiDAR scan with visualization markers
   void PublishScan();
+
+  /**
+   * @brief Create the output directory tree and open the trajectory files.
+   * @details No-op when mapping.save_path is empty. Disables saving on failure
+   *          rather than aborting the run.
+   */
+  void InitResultSaving();
+
+  /**
+   * @brief Append the current frame's LiDAR and IMU poses to the TUM files.
+   * @details Must be called after the EKF update for the frame. The LiDAR pose
+   *          is composed as T_world_lidar = T_world_imu * T_imu_lidar using the
+   *          filter's online extrinsic estimate.
+   */
+  void SaveFramePoses();
+
+  /**
+   * @brief Write the current scan to scans/<index>.pcd.
+   * @details Must be called after undistortion but BEFORE MapIncremental, which
+   *          transforms scan_cloud_ to world coordinates in place. Points are
+   *          therefore stored in the LiDAR frame, which is what bundle
+   *          adjustment needs; set mapping.save_scans_local to false to store
+   *          world-frame points instead.
+   */
+  void SaveFrameCloud();
+
+  /// @brief Write the accumulated global map to map.pcd; idempotent.
+  void SaveMap();
+
   /// @brief Publish normal/curvature/saliency as visualization markers
   void PublishMarkers();
   /// @brief Publish LiDAR-based odometry estimate
@@ -171,6 +203,23 @@ class MappingNode : public rclcpp::Node {
          mean_state_time_ = 0, mean_map_time_ = 0, mean_total_time_ = 0;
 
   std::string node_namespace_;
+
+  /// @brief Output directory for saved results; empty disables all saving
+  std::string save_path_;
+  /// @brief Save per-scan clouds in the LiDAR frame (true) or world frame
+  bool save_scans_local_ = true;
+  /// @brief Whether per-scan cloud dumping is enabled
+  bool save_scans_ = true;
+  /// @brief Directory holding the per-scan PCD files
+  std::string scans_dir_;
+  /// @brief Open output streams for the TUM trajectory files
+  std::ofstream lidar_pose_file_, imu_pose_file_;
+  /// @brief Guards the result-saving path against concurrent invocation
+  std::mutex save_mutex_;
+  /// @brief Set once the final map has been written, to avoid double writes
+  bool results_saved_ = false;
+  /// @brief Service to flush the map and trajectories on demand
+  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr save_srv_;
 
   int pub_map_n_secs_;
   int vel_pose_counter_ = 0;
