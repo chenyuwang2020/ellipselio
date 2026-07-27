@@ -1,0 +1,19 @@
+# 室内数据(单个房间,场景对角线 < 10 m)
+#
+# 用法:
+#   cd ~/ws_chenyu/slam/ellipselio/src/ellipselio/ba
+#   PYTHONPATH=. uv run --no-sync python -m ellipselio_ba.run --config configs/indoor.yaml
+#
+# 查看所有预设的参数对照表:
+#   PYTHONPATH=. uv run --no-sync python -m ellipselio_ba.run --show-presets
+
+preset: indoor
+# ↑ 等价于下面四行(取消注释即可单独调整,写在这里会覆盖预设):
+#   voxel_size: 0.2      # 体素边长(m)。室内房间尺度,能装进单个平面内部
+#   huber: 0.02          # 鲁棒核(m)。约 3 倍近距离测距噪声
+#   outer: 6             # 外层迭代。实测第 3 轮后残差已收敛
+#   map_voxel: 0.01      # 导出地图降采样(m)。室内厚度约 0.6 cm,取 1 cm
+
+result_dir: /path/to/ellipselio-results-path
+
+rebuild_map: true        # 导出 map_before.pcd / map_after.pcd 便于对比

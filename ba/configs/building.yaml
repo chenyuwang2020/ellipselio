@@ -1,0 +1,19 @@
+# 楼层 / 走廊(场景 10~30 m)
+#
+# 用法:
+#   cd ~/ws_chenyu/slam/ellipselio/src/ellipselio/ba
+#   PYTHONPATH=. uv run --no-sync python -m ellipselio_ba.run --config configs/building.yaml
+#
+# 查看所有预设的参数对照表:
+#   PYTHONPATH=. uv run --no-sync python -m ellipselio_ba.run --show-presets
+
+preset: building
+# ↑ 等价于下面四行(取消注释即可单独调整,写在这里会覆盖预设):
+#   voxel_size: 0.4      # 体素边长(m)。介于房间与街道之间
+#   huber: 0.04          # 鲁棒核(m)
+#   outer: 8             # 外层迭代
+#   map_voxel: 0.02      # 导出地图降采样(m)
+
+result_dir: /path/to/lio_res/ellipselio
+
+rebuild_map: true
